@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
 from models import Base, Project
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -15,10 +16,15 @@ def get_db():
     finally:
         db.close()
 
+# Pydantic model for the request body
+class ProjectCreate(BaseModel):
+    name: str
+
 @app.post("/projects/")
-def create_project(name: str):
+def create_project(project: ProjectCreate):
+    print("NAME IN PROJECT", project)
     db = SessionLocal()
-    db_project = Project(name=name)
+    db_project = Project(name=project.name)
     db.add(db_project)
     db.commit()
     db.refresh(db_project)

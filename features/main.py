@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
 from models import Base, Feature
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -15,10 +16,15 @@ def get_db():
     finally:
         db.close()
 
+# Pydantic model for the request body
+class FeatureCreate(BaseModel):
+    name: str
+    project_id: int
+
 @app.post("/features/")
-def create_feature(name: str, project_id: int):
+def create_feature(feature: FeatureCreate):
     db = SessionLocal()
-    db_feature = Feature(name=name, project_id=project_id)
+    db_feature = Feature(name=feature.name, project_id=feature.project_id)
     db.add(db_feature)
     db.commit()
     db.refresh(db_feature)
