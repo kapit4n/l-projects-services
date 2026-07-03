@@ -76,3 +76,9 @@ async def scrape_github():
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape")
         return response.json()
+
+@app.get("/scrape/logs")
+async def get_scrape_logs():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape/logs")
+        return response.json()

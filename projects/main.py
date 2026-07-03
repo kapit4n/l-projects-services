@@ -1,7 +1,7 @@
 import json, os, asyncio
 from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
-from models import Base, Project, CommitSync
+from models import Base, Project, CommitSync, ScrapeLog
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -99,6 +99,23 @@ def list_commits():
     return db.query(CommitSync).all()
 
 
+@app.get("/scrape/logs")
+def get_scrape_logs():
+    db = SessionLocal()
+    logs = db.query(ScrapeLog).order_by(ScrapeLog.id.desc()).limit(20).all()
+    return [
+        {
+            "id": log.id,
+            "scraped_at": log.scraped_at.isoformat() if log.scraped_at else "",
+            "total_repos": log.total_repos,
+            "projects_updated": log.projects_updated,
+            "projects_added": log.projects_added,
+            "details": log.details,
+        }
+        for log in logs
+    ]
+
+
 @app.get("/commits/{project_name}", response_model=CommitSyncResponse)
 def get_commit(project_name: str):
     db = SessionLocal()
@@ -181,6 +198,10 @@ async def scrape_github():
         if key not in existing_map or p["id"] < existing_map[key]["id"]:
             existing_map[key] = p
 
+    projects_updated = 0
+    projects_added = 0
+    details = []
+
     merged = []
     for entry in entries:
         if entry["name"] in existing_map:
@@ -188,10 +209,14 @@ async def scrape_github():
             old.update(entry)
             merged.append(old)
             del existing_map[entry["name"]]
+            projects_updated += 1
+            details.append(f"Updated: {entry['name']}")
         else:
             max_id = max((p["id"] for p in merged), default=0)
             entry["id"] = max_id + 1
             merged.append(entry)
+            projects_added += 1
+            details.append(f"Added: {entry['name']}")
 
     for p in existing_map.values():
         merged.append(p)
@@ -199,8 +224,21 @@ async def scrape_github():
     with open(DATA_FILE, "w") as f:
         json.dump(merged, f, indent=2)
 
+    db = SessionLocal()
+    log = ScrapeLog(
+        total_repos=len(entries),
+        projects_updated=projects_updated,
+        projects_added=projects_added,
+        details="\n".join(details),
+    )
+    db.add(log)
+    db.commit()
+
     return {
         "message": f"Scraped {len(entries)} projects from {GITHUB_USER}",
         "count": len(entries),
         "total": len(merged),
+        "updated": projects_updated,
+        "added": projects_added,
+        "details": details,
     }
