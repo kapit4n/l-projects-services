@@ -42,3 +42,37 @@ async def read_commentary(commentary_id: int):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{COMMENTARIES_SERVICE_URL}/commentaries/{commentary_id}")
         return response.json()
+
+
+@app.post("/commits/")
+async def upsert_commit(project_name: str, total_commits: int):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{PROJECTS_SERVICE_URL}/commits/", json={"project_name": project_name, "total_commits": total_commits})
+        return response.json()
+
+@app.post("/commits/batch")
+async def upsert_commits(commits: list):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{PROJECTS_SERVICE_URL}/commits/batch", json=commits)
+        return response.json()
+
+@app.get("/commits/")
+async def list_commits():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/commits/")
+        return response.json()
+
+@app.get("/commits/{project_name}")
+async def get_commit(project_name: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/commits/{project_name}")
+        if response.status_code == 404:
+            return {"total_commits": 0}
+        return response.json()
+
+
+@app.get("/scrape")
+async def scrape_github():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape")
+        return response.json()
