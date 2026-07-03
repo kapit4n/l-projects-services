@@ -3,14 +3,19 @@ from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
 from models import Base, Project, CommitSync, ScrapeLog, RepoDetail
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 from datetime import datetime
 import base64
 import httpx
+from sqlalchemy import inspect
 
 app = FastAPI()
 
-# Create database tables
+# Migrate old projects table if needed (add missing columns)
+inspector = inspect(engine)
+columns = [c["name"] for c in inspector.get_columns("projects")] if "projects" in inspector.get_table_names() else []
+if "startDate" not in columns or "archived" not in columns:
+    Project.__table__.drop(engine, checkfirst=True)
 Base.metadata.create_all(bind=engine)
 
 # Dependency to get DB session
@@ -21,9 +26,28 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic model for the request body
+# Pydantic models
 class ProjectCreate(BaseModel):
     name: str
+
+
+class ProjectData(BaseModel):
+    id: int = 0
+    name: str = ""
+    startDate: str = ""
+    updatedDate: str = ""
+    dir: str = ""
+    img: str = ""
+    features: Any = []
+    categories: Any = []
+    skills: Any = []
+    contributions: int = 0
+    description: str = ""
+    languageKeys: Any = []
+    language: str = ""
+    size: int = 0
+    openIssues: int = 0
+    languages: Any = {}
 
 
 class CommitSyncCreate(BaseModel):
@@ -41,15 +65,103 @@ class CommitSyncResponse(BaseModel):
         from_attributes = True
 
 
+def project_to_dict(p):
+    return {
+        "id": p.id,
+        "name": p.name,
+        "archived": p.archived or False,
+        "startDate": p.startDate or "",
+        "updatedDate": p.updatedDate or "",
+        "dir": p.dir or "",
+        "img": p.img or "",
+        "features": json.loads(p.features) if isinstance(p.features, str) else (p.features or []),
+        "categories": json.loads(p.categories) if isinstance(p.categories, str) else (p.categories or []),
+        "skills": json.loads(p.skills) if isinstance(p.skills, str) else (p.skills or []),
+        "contributions": p.contributions or 0,
+        "description": p.description or "",
+        "languageKeys": json.loads(p.languageKeys) if isinstance(p.languageKeys, str) else (p.languageKeys or []),
+        "language": p.language or "",
+        "size": p.size or 0,
+        "openIssues": p.openIssues or 0,
+        "languages": json.loads(p.languages) if isinstance(p.languages, str) else (p.languages or {}),
+    }
+
+
+def upsert_project(db, data: ProjectData):
+    existing = db.query(Project).filter(Project.name == data.name).first()
+    if existing:
+        existing.startDate = data.startDate
+        existing.updatedDate = data.updatedDate
+        existing.dir = data.dir
+        if data.img:
+            existing.img = data.img
+        existing.features = json.dumps(data.features)
+        existing.categories = json.dumps(data.categories)
+        existing.skills = json.dumps(data.skills)
+        existing.contributions = data.contributions
+        existing.description = data.description
+        existing.languageKeys = json.dumps(data.languageKeys)
+        existing.language = data.language
+        existing.size = data.size
+        existing.openIssues = data.openIssues
+        existing.languages = json.dumps(data.languages)
+        db.commit()
+        db.refresh(existing)
+        return existing, "updated"
+    else:
+        p = Project(
+            name=data.name,
+            startDate=data.startDate,
+            updatedDate=data.updatedDate,
+            dir=data.dir,
+            img=data.img,
+            features=json.dumps(data.features),
+            categories=json.dumps(data.categories),
+            skills=json.dumps(data.skills),
+            contributions=data.contributions,
+            description=data.description,
+            languageKeys=json.dumps(data.languageKeys),
+            language=data.language,
+            size=data.size,
+            openIssues=data.openIssues,
+            languages=json.dumps(data.languages),
+        )
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+        return p, "created"
+
+
 @app.post("/projects/")
-def create_project(project: ProjectCreate):
-    print("NAME IN PROJECT", project)
+def create_or_update_project(project: ProjectData):
     db = SessionLocal()
-    db_project = Project(name=project.name)
-    db.add(db_project)
-    db.commit()
-    db.refresh(db_project)
-    return db_project
+    p, action = upsert_project(db, project)
+    return {"action": action, "project": project_to_dict(p)}
+
+
+@app.post("/projects/batch")
+def upsert_projects(projects: List[ProjectData]):
+    db = SessionLocal()
+    results = []
+    for data in projects:
+        p, action = upsert_project(db, data)
+        results.append({"action": action, "project": project_to_dict(p)})
+    return results
+
+
+@app.get("/projects/")
+def list_projects():
+    db = SessionLocal()
+    projects = db.query(Project).all()
+    details_map = {d.project_name: d.img for d in db.query(RepoDetail).all() if d.img}
+    result = []
+    for p in projects:
+        d = project_to_dict(p)
+        if not d["img"] and p.name in details_map:
+            d["img"] = details_map[p.name]
+        result.append(d)
+    return result
+
 
 @app.get("/projects/{project_id}")
 def read_project(project_id: int):
@@ -57,7 +169,29 @@ def read_project(project_id: int):
     project = db.query(Project).filter(Project.id == project_id).first()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    return project_to_dict(project)
+
+
+@app.put("/projects/{project_name}/archive")
+def archive_project(project_name: str):
+    db = SessionLocal()
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.archived = True
+    db.commit()
+    return {"action": "archived", "project": project_to_dict(project)}
+
+
+@app.put("/projects/{project_name}/unarchive")
+def unarchive_project(project_name: str):
+    db = SessionLocal()
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.archived = False
+    db.commit()
+    return {"action": "unarchived", "project": project_to_dict(project)}
 
 
 @app.post("/commits/")
@@ -130,7 +264,6 @@ GITHUB_USER = "kapit4n"
 GITHUB_API = "https://api.github.com"
 SCRAPE_LIMIT = 20
 ARCHITECTURE_PATHS = ["ARCHITECTURE.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "ARCHITECTURE", "docs/architecture"]
-DATA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "l-projects", "public", "data", "projects-all.json"))
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
@@ -186,7 +319,7 @@ async def discover_repo_image(client, project_name, headers):
 
 async def fetch_repo_details_from_github(project_name: str):
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
-    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True}
+    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": ""}
 
     async with httpx.AsyncClient() as client:
         try:
@@ -215,6 +348,7 @@ async def fetch_repo_details_from_github(project_name: str):
                 has_ui_keyword = bool(topic_set & {"angular", "react", "vue", "mobile", "ios", "android", "ui", "frontend", "flutter"} or language in UI_LANGUAGES)
                 result["is_backend"] = has_backend_keyword or not has_ui_keyword
 
+                result["updated_date"] = repo_data.get("pushed_at") or ""
                 result["img"] = await discover_repo_image(client, project_name, headers)
         except Exception:
             pass
@@ -296,6 +430,16 @@ async def fetch_repo_details(project_name: str):
         db.add(existing)
     db.commit()
     db.refresh(existing)
+
+    if data.get("img") or data.get("updated_date"):
+        db_project = db.query(Project).filter(Project.name == project_name).first()
+        if db_project:
+            if data.get("img"):
+                db_project.img = data["img"]
+            if data.get("updated_date"):
+                db_project.updatedDate = data["updated_date"]
+            db.commit()
+
     return {
         "project_name": existing.project_name,
         "top_commits": existing.top_commits,
@@ -308,20 +452,29 @@ async def fetch_repo_details(project_name: str):
 
 
 @app.get("/scrape")
-async def scrape_github():
+async def scrape_github(query: Optional[str] = None, limit: Optional[int] = None):
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
+    scrape_limit = limit or SCRAPE_LIMIT
 
     async with httpx.AsyncClient() as client:
-        repos_resp = await client.get(
-            f"{GITHUB_API}/users/{GITHUB_USER}/repos?per_page=100&sort=updated&direction=desc",
-            headers=headers,
-        )
-        repos_resp.raise_for_status()
-        repos = repos_resp.json()
-        top20 = repos[:SCRAPE_LIMIT]
+        if query:
+            search_q = f"user:{GITHUB_USER}+{query}+in:name"
+            search_url = f"{GITHUB_API}/search/repositories?q={search_q}&sort=updated&order=desc&per_page={scrape_limit}"
+            repos_resp = await client.get(search_url, headers=headers)
+            repos_resp.raise_for_status()
+            search_data = repos_resp.json()
+            repos = search_data.get("items", [])
+        else:
+            repos_resp = await client.get(
+                f"{GITHUB_API}/users/{GITHUB_USER}/repos?per_page=100&sort=updated&direction=desc",
+                headers=headers,
+            )
+            repos_resp.raise_for_status()
+            repos = repos_resp.json()
+            repos = repos[:scrape_limit]
 
         entries = []
-        for repo in top20:
+        for repo in repos:
             name = repo["name"]
             print(f"  Processing {name}...")
 
@@ -343,7 +496,6 @@ async def scrape_github():
             topics = repo.get("topics", [])
 
             entries.append({
-                "id": repo["id"],
                 "startDate": repo.get("created_at", ""),
                 "updatedDate": repo.get("pushed_at") or repo.get("updated_at", ""),
                 "name": name,
@@ -363,44 +515,56 @@ async def scrape_github():
 
     entries.sort(key=lambda e: e["updatedDate"], reverse=True)
 
-    existing = []
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f:
-            existing = json.load(f)
-
-    existing_map = {}
-    for p in existing:
-        key = p["name"]
-        if key not in existing_map or p["id"] < existing_map[key]["id"]:
-            existing_map[key] = p
-
+    db = SessionLocal()
     projects_updated = 0
     projects_added = 0
     details = []
 
-    merged = []
     for entry in entries:
-        if entry["name"] in existing_map:
-            old = existing_map[entry["name"]]
-            old.update(entry)
-            merged.append(old)
-            del existing_map[entry["name"]]
+        existing = db.query(Project).filter(Project.name == entry["name"]).first()
+        if existing:
+            existing.archived = False
+            existing.startDate = entry.get("startDate", "")
+            existing.updatedDate = entry.get("updatedDate", "")
+            existing.dir = entry.get("dir", "")
+            if entry.get("img"):
+                existing.img = entry.get("img", "")
+            existing.features = json.dumps(entry.get("features", []))
+            existing.categories = json.dumps(entry.get("categories", []))
+            existing.skills = json.dumps(entry.get("skills", []))
+            existing.contributions = entry.get("contributions", 0)
+            existing.description = entry.get("description", "")
+            existing.languageKeys = json.dumps(entry.get("languageKeys", []))
+            existing.language = entry.get("language", "")
+            existing.size = entry.get("size", 0)
+            existing.openIssues = entry.get("openIssues", 0)
+            existing.languages = json.dumps(entry.get("languages", {}))
             projects_updated += 1
             details.append(f"Updated: {entry['name']}")
         else:
-            max_id = max((p["id"] for p in merged), default=0)
-            entry["id"] = max_id + 1
-            merged.append(entry)
+            p = Project(
+                name=entry["name"],
+                startDate=entry.get("startDate", ""),
+                updatedDate=entry.get("updatedDate", ""),
+                dir=entry.get("dir", ""),
+                img=entry.get("img", ""),
+                features=json.dumps(entry.get("features", [])),
+                categories=json.dumps(entry.get("categories", [])),
+                skills=json.dumps(entry.get("skills", [])),
+                contributions=entry.get("contributions", 0),
+                description=entry.get("description", ""),
+                languageKeys=json.dumps(entry.get("languageKeys", [])),
+                language=entry.get("language", ""),
+                size=entry.get("size", 0),
+                openIssues=entry.get("openIssues", 0),
+                languages=json.dumps(entry.get("languages", {})),
+            )
+            db.add(p)
             projects_added += 1
             details.append(f"Added: {entry['name']}")
 
-    for p in existing_map.values():
-        merged.append(p)
+    db.commit()
 
-    with open(DATA_FILE, "w") as f:
-        json.dump(merged, f, indent=2)
-
-    db = SessionLocal()
     log = ScrapeLog(
         total_repos=len(entries),
         projects_updated=projects_updated,
@@ -410,10 +574,13 @@ async def scrape_github():
     db.add(log)
     db.commit()
 
+    all_projects = db.query(Project).all()
+
+    q_label = f" matching '{query}'" if query else ""
     return {
-        "message": f"Scraped {len(entries)} projects from {GITHUB_USER}",
+        "message": f"Scraped {len(entries)} projects{q_label} from {GITHUB_USER}",
         "count": len(entries),
-        "total": len(merged),
+        "total": len(all_projects),
         "updated": projects_updated,
         "added": projects_added,
         "details": details,

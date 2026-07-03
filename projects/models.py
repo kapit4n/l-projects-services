@@ -6,6 +6,21 @@ class Project(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
+    archived = Column(Boolean, default=False)
+    startDate = Column(String, default="")
+    updatedDate = Column(String, default="")
+    dir = Column(String, default="")
+    img = Column(String, default="")
+    features = Column(Text, default="[]")
+    categories = Column(Text, default="[]")
+    skills = Column(Text, default="[]")
+    contributions = Column(Integer, default=0)
+    description = Column(Text, default="")
+    languageKeys = Column(Text, default="[]")
+    language = Column(String, default="")
+    size = Column(Integer, default=0)
+    openIssues = Column(Integer, default=0)
+    languages = Column(Text, default="{}")
 
 
 class CommitSync(Base):

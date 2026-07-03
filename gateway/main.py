@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
@@ -17,15 +17,39 @@ FEATURES_SERVICE_URL = "http://localhost:8002"
 COMMENTARIES_SERVICE_URL = "http://localhost:8003"
 
 @app.post("/projects/")
-async def create_project(name: str):
+async def create_project(project: dict):
     async with httpx.AsyncClient() as client:
-        response = await client.post(f"{PROJECTS_SERVICE_URL}/projects/", json={"name": name})
+        response = await client.post(f"{PROJECTS_SERVICE_URL}/projects/", json=project)
+        return response.json()
+
+@app.get("/projects/")
+async def list_projects():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/projects/")
+        return response.json()
+
+@app.post("/projects/batch")
+async def upsert_projects(projects: list):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{PROJECTS_SERVICE_URL}/projects/batch", json=projects)
         return response.json()
 
 @app.get("/projects/{project_id}")
 async def read_project(project_id: int):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/projects/{project_id}")
+        return response.json()
+
+@app.put("/projects/{project_name}/archive")
+async def archive_project(project_name: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.put(f"{PROJECTS_SERVICE_URL}/projects/{project_name}/archive")
+        return response.json()
+
+@app.put("/projects/{project_name}/unarchive")
+async def unarchive_project(project_name: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.put(f"{PROJECTS_SERVICE_URL}/projects/{project_name}/unarchive")
         return response.json()
 
 @app.post("/features/")
@@ -81,9 +105,10 @@ async def get_commit(project_name: str):
 
 
 @app.get("/scrape")
-async def scrape_github():
+async def scrape_github(request: Request):
+    params = dict(request.query_params)
     async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape")
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape", params=params)
         return response.json()
 
 @app.get("/scrape/logs")
