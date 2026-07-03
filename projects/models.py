@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean
 from database import Base
 from datetime import datetime
 
@@ -24,3 +24,15 @@ class ScrapeLog(Base):
     projects_updated = Column(Integer, default=0)
     projects_added = Column(Integer, default=0)
     details = Column(Text, default="")
+
+
+class RepoDetail(Base):
+    __tablename__ = "repo_details"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, index=True, unique=True)
+    top_commits = Column(Text, default="")
+    readme = Column(Text, default="")
+    architecture = Column(Text, default="")
+    img = Column(String, default="")
+    is_backend = Column(Boolean, default=True)
+    fetched_at = Column(DateTime, default=datetime.utcnow)

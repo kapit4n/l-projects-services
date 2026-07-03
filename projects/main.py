@@ -1,10 +1,11 @@
 import json, os, asyncio
 from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
-from models import Base, Project, CommitSync, ScrapeLog
+from models import Base, Project, CommitSync, ScrapeLog, RepoDetail
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+import base64
 import httpx
 
 app = FastAPI()
@@ -128,7 +129,182 @@ def get_commit(project_name: str):
 GITHUB_USER = "kapit4n"
 GITHUB_API = "https://api.github.com"
 SCRAPE_LIMIT = 20
+ARCHITECTURE_PATHS = ["ARCHITECTURE.md", "docs/ARCHITECTURE.md", "docs/architecture.md", "ARCHITECTURE", "docs/architecture"]
 DATA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "l-projects", "public", "data", "projects-all.json"))
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+IMAGE_DIRS = ["screenshots", "mockups", "assets", "images", "img", "screens", "previews"]
+IMAGE_NAMES = ["main", "dashboard", "home", "screenshot", "preview", "app", "ui", "interface"]
+
+BACKEND_KEYWORDS = {"api", "cli", "backend", "server", "service", "graphql", "rest", "microservice"}
+BACKEND_LANGUAGES = {"python", "go", "java", "ruby", "php", "rust", "c#", "csharp", "c++", "cpp", "swift", "kotlin"}
+UI_LANGUAGES = {"typescript", "javascript", "dart", "html", "css", "scss", "sass"}
+
+
+async def discover_repo_image(client, project_name, headers):
+    branches_to_try = ["main", "master"]
+
+    for branch in branches_to_try:
+        try:
+            root_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/git/trees/{branch}?recursive=1",
+                headers=headers,
+            )
+            if root_resp.status_code != 200:
+                continue
+
+            tree = root_resp.json().get("tree", [])
+            candidates = []
+
+            for entry in tree:
+                if entry["type"] != "blob":
+                    continue
+                path = entry["path"]
+                name_lower = entry["path"].split("/")[-1].rsplit(".", 1)[0].lower()
+                ext = "." + entry["path"].rsplit(".", 1)[-1].lower() if "." in entry["path"] else ""
+
+                if ext not in IMAGE_EXTENSIONS:
+                    continue
+
+                if name_lower in IMAGE_NAMES:
+                    candidates.append((0, path))
+                elif any(d in path.lower() for d in IMAGE_DIRS):
+                    candidates.append((1, path))
+                else:
+                    candidates.append((2, path))
+
+            if candidates:
+                candidates.sort(key=lambda x: (x[0], len(x[1])))
+                best = candidates[0][1]
+                return f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{best}"
+        except Exception:
+            continue
+
+    return ""
+
+
+async def fetch_repo_details_from_github(project_name: str):
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
+    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            commits_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/commits?per_page=5",
+                headers=headers,
+            )
+            if commits_resp.status_code == 200:
+                result["top_commits"] = json.dumps(commits_resp.json())
+        except Exception:
+            pass
+
+        try:
+            repo_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}",
+                headers=headers,
+            )
+            if repo_resp.status_code == 200:
+                repo_data = repo_resp.json()
+                topics = repo_data.get("topics", [])
+                language = (repo_data.get("language") or "").lower()
+                description = (repo_data.get("description") or "").lower()
+
+                topic_set = {t.lower() for t in topics}
+                has_backend_keyword = bool(topic_set & BACKEND_KEYWORDS or language in BACKEND_LANGUAGES)
+                has_ui_keyword = bool(topic_set & {"angular", "react", "vue", "mobile", "ios", "android", "ui", "frontend", "flutter"} or language in UI_LANGUAGES)
+                result["is_backend"] = has_backend_keyword or not has_ui_keyword
+
+                result["img"] = await discover_repo_image(client, project_name, headers)
+        except Exception:
+            pass
+
+        try:
+            readme_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/readme",
+                headers=headers,
+            )
+            if readme_resp.status_code == 200:
+                data = readme_resp.json()
+                if data.get("content"):
+                    result["readme"] = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+        for path in ARCHITECTURE_PATHS:
+            try:
+                arch_resp = await client.get(
+                    f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/contents/{path}",
+                    headers=headers,
+                )
+                if arch_resp.status_code == 200:
+                    data = arch_resp.json()
+                    if data.get("content"):
+                        result["architecture"] = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+                        break
+            except Exception:
+                pass
+
+        if not result["architecture"] and result["readme"]:
+            import re
+            match = re.search(r"##?\s*(Architecture|System Design|Technical Architecture|Architecture Overview)", result["readme"])
+            if match:
+                result["architecture"] = result["readme"]
+
+    return result
+
+
+@app.get("/repo-details/{project_name}")
+def get_repo_details(project_name: str):
+    db = SessionLocal()
+    detail = db.query(RepoDetail).filter(RepoDetail.project_name == project_name).first()
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Repo details not found. POST to /repo-details/{project_name}/fetch to fetch them.")
+    return {
+        "project_name": detail.project_name,
+        "top_commits": detail.top_commits,
+        "readme": detail.readme,
+        "architecture": detail.architecture,
+        "img": detail.img,
+        "is_backend": detail.is_backend,
+        "fetched_at": detail.fetched_at.isoformat() if detail.fetched_at else "",
+    }
+
+
+@app.post("/repo-details/{project_name}/fetch")
+async def fetch_repo_details(project_name: str):
+    data = await fetch_repo_details_from_github(project_name)
+    db = SessionLocal()
+    existing = db.query(RepoDetail).filter(RepoDetail.project_name == project_name).first()
+    if existing:
+        existing.top_commits = data["top_commits"]
+        existing.readme = data["readme"]
+        existing.architecture = data["architecture"]
+        existing.img = data["img"]
+        existing.is_backend = data["is_backend"]
+        existing.fetched_at = datetime.utcnow()
+    else:
+        existing = RepoDetail(
+            project_name=project_name,
+            top_commits=data["top_commits"],
+            readme=data["readme"],
+            architecture=data["architecture"],
+            img=data["img"],
+            is_backend=data["is_backend"],
+            fetched_at=datetime.utcnow(),
+        )
+        db.add(existing)
+    db.commit()
+    db.refresh(existing)
+    return {
+        "project_name": existing.project_name,
+        "top_commits": existing.top_commits,
+        "readme": existing.readme,
+        "architecture": existing.architecture,
+        "img": existing.img,
+        "is_backend": existing.is_backend,
+        "fetched_at": existing.fetched_at.isoformat() if existing.fetched_at else "",
+    }
 
 
 @app.get("/scrape")

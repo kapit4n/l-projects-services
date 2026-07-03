@@ -1,7 +1,16 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 PROJECTS_SERVICE_URL = "http://localhost:8001"
 FEATURES_SERVICE_URL = "http://localhost:8002"
@@ -73,7 +82,7 @@ async def get_commit(project_name: str):
 
 @app.get("/scrape")
 async def scrape_github():
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape")
         return response.json()
 
@@ -81,4 +90,20 @@ async def scrape_github():
 async def get_scrape_logs():
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/scrape/logs")
+        return response.json()
+
+
+@app.get("/repo-details/{project_name}")
+async def get_repo_details(project_name: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}")
+        if response.status_code == 404:
+            return None
+        return response.json()
+
+
+@app.post("/repo-details/{project_name}/fetch")
+async def fetch_repo_details(project_name: str):
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}/fetch")
         return response.json()
