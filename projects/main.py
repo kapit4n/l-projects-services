@@ -340,7 +340,7 @@ async def discover_features(client, project_name, headers):
                 continue
 
             tree = root_resp.json().get("tree", [])
-            groups = {}
+            groups_map = {}
 
             for entry in tree:
                 if entry["type"] != "blob":
@@ -352,7 +352,17 @@ async def discover_features(client, project_name, headers):
                 parent_dir, filename = parts
 
                 parent_lower = parent_dir.lower()
-                if not any(parent_lower == d or parent_lower.startswith(d + "/") for d in FEATURES_DIRS):
+                matched_dir = None
+                for d in FEATURES_DIRS:
+                    if parent_lower == d:
+                        matched_dir = d
+                        group_name = ""
+                        break
+                    if parent_lower.startswith(d + "/"):
+                        matched_dir = d
+                        group_name = parent_dir[len(d) + 1:]
+                        break
+                if matched_dir is None:
                     continue
 
                 name_parts = filename.rsplit(".", 1)
@@ -360,18 +370,27 @@ async def discover_features(client, project_name, headers):
                     continue
                 base_name, ext = name_parts[0].lower(), name_parts[1].lower()
 
+                key = (group_name, base_name)
                 if ext in ("png", "jpg", "jpeg", "gif", "webp", "svg"):
-                    groups.setdefault(base_name, {})["img"] = path
+                    groups_map.setdefault(key, {})["img"] = path
                 elif ext == "md":
-                    groups.setdefault(base_name, {})["desc"] = path
+                    groups_map.setdefault(key, {})["desc"] = path
+
+            grouped = {}
+            for (group_name, base_name), files in groups_map.items():
+                if "img" in files and "desc" in files:
+                    img_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{files['img']}"
+                    desc_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{files['desc']}"
+                    grouped.setdefault(group_name, []).append({
+                        "img": img_url, "desc": desc_url, "name": base_name
+                    })
 
             result = []
-            for base_name in sorted(groups.keys()):
-                group = groups[base_name]
-                if "img" in group and "desc" in group:
-                    img_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{group['img']}"
-                    desc_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{group['desc']}"
-                    result.append({"img": img_url, "desc": desc_url, "name": base_name})
+            for gname in sorted(grouped.keys()):
+                result.append({
+                    "group": gname,
+                    "features": grouped[gname]
+                })
 
             if result:
                 return result
