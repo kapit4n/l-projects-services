@@ -7,7 +7,7 @@ from typing import List, Optional, Any
 from datetime import datetime
 import base64
 import httpx
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 app = FastAPI()
 
@@ -17,6 +17,13 @@ columns = [c["name"] for c in inspector.get_columns("projects")] if "projects" i
 if "startDate" not in columns or "archived" not in columns:
     Project.__table__.drop(engine, checkfirst=True)
 Base.metadata.create_all(bind=engine)
+
+# Migrate repo_details table if needed (add features_data column)
+rd_cols = {c["name"] for c in inspector.get_columns("repo_details")} if "repo_details" in inspector.get_table_names() else set()
+if "features_data" not in rd_cols:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE repo_details ADD COLUMN features_data TEXT DEFAULT '[]'"))
+        conn.commit()
 
 # Dependency to get DB session
 def get_db():
@@ -267,7 +274,7 @@ ARCHITECTURE_PATHS = ["ARCHITECTURE.md", "docs/ARCHITECTURE.md", "docs/architect
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
-IMAGE_DIRS = ["screenshots", "mockups", "assets", "images", "img", "screens", "previews"]
+IMAGE_DIRS = ["screenshots", "mockups", "mockup", "assets", "images", "img", "screens", "previews"]
 IMAGE_NAMES = ["main", "dashboard", "home", "screenshot", "preview", "app", "ui", "interface"]
 
 BACKEND_KEYWORDS = {"api", "cli", "backend", "server", "service", "graphql", "rest", "microservice"}
@@ -317,9 +324,66 @@ async def discover_repo_image(client, project_name, headers):
     return ""
 
 
+FEATURES_DIRS = ["mockups/features", "mockup/features"]
+
+
+async def discover_features(client, project_name, headers):
+    branches_to_try = ["main", "master"]
+
+    for branch in branches_to_try:
+        try:
+            root_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/git/trees/{branch}?recursive=1",
+                headers=headers,
+            )
+            if root_resp.status_code != 200:
+                continue
+
+            tree = root_resp.json().get("tree", [])
+            groups = {}
+
+            for entry in tree:
+                if entry["type"] != "blob":
+                    continue
+                path = entry["path"]
+                parts = path.rsplit("/", 1)
+                if len(parts) != 2:
+                    continue
+                parent_dir, filename = parts
+
+                parent_lower = parent_dir.lower()
+                if not any(parent_lower == d or parent_lower.startswith(d + "/") for d in FEATURES_DIRS):
+                    continue
+
+                name_parts = filename.rsplit(".", 1)
+                if len(name_parts) != 2:
+                    continue
+                base_name, ext = name_parts[0].lower(), name_parts[1].lower()
+
+                if ext in ("png", "jpg", "jpeg", "gif", "webp", "svg"):
+                    groups.setdefault(base_name, {})["img"] = path
+                elif ext == "md":
+                    groups.setdefault(base_name, {})["desc"] = path
+
+            result = []
+            for base_name in sorted(groups.keys()):
+                group = groups[base_name]
+                if "img" in group and "desc" in group:
+                    img_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{group['img']}"
+                    desc_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{group['desc']}"
+                    result.append({"img": img_url, "desc": desc_url, "name": base_name})
+
+            if result:
+                return result
+        except Exception:
+            continue
+
+    return []
+
+
 async def fetch_repo_details_from_github(project_name: str):
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
-    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": ""}
+    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": "", "features_data": []}
 
     async with httpx.AsyncClient() as client:
         try:
@@ -350,6 +414,7 @@ async def fetch_repo_details_from_github(project_name: str):
 
                 result["updated_date"] = repo_data.get("pushed_at") or ""
                 result["img"] = await discover_repo_image(client, project_name, headers)
+                result["features_data"] = await discover_features(client, project_name, headers)
         except Exception:
             pass
 
@@ -401,6 +466,7 @@ def get_repo_details(project_name: str):
         "architecture": detail.architecture,
         "img": detail.img,
         "is_backend": detail.is_backend,
+        "features_data": json.loads(detail.features_data) if isinstance(detail.features_data, str) else (detail.features_data or []),
         "fetched_at": detail.fetched_at.isoformat() if detail.fetched_at else "",
     }
 
@@ -416,6 +482,7 @@ async def fetch_repo_details(project_name: str):
         existing.architecture = data["architecture"]
         existing.img = data["img"]
         existing.is_backend = data["is_backend"]
+        existing.features_data = json.dumps(data["features_data"])
         existing.fetched_at = datetime.utcnow()
     else:
         existing = RepoDetail(
@@ -425,6 +492,7 @@ async def fetch_repo_details(project_name: str):
             architecture=data["architecture"],
             img=data["img"],
             is_backend=data["is_backend"],
+            features_data=json.dumps(data["features_data"]),
             fetched_at=datetime.utcnow(),
         )
         db.add(existing)
@@ -447,6 +515,7 @@ async def fetch_repo_details(project_name: str):
         "architecture": existing.architecture,
         "img": existing.img,
         "is_backend": existing.is_backend,
+        "features_data": json.loads(existing.features_data) if isinstance(existing.features_data, str) else (existing.features_data or []),
         "fetched_at": existing.fetched_at.isoformat() if existing.fetched_at else "",
     }
 

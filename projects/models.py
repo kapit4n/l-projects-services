@@ -50,4 +50,5 @@ class RepoDetail(Base):
     architecture = Column(Text, default="")
     img = Column(String, default="")
     is_backend = Column(Boolean, default=True)
+    features_data = Column(Text, default="[]")
     fetched_at = Column(DateTime, default=datetime.utcnow)
