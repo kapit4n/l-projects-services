@@ -6,7 +6,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,6 +124,13 @@ async def get_repo_details(project_name: str):
         response = await client.get(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}")
         if response.status_code == 404:
             return None
+        return response.json()
+
+
+@app.get("/repo-details/{project_name}/docs")
+async def get_project_docs(project_name: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}/docs")
         return response.json()
 
 

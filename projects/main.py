@@ -24,6 +24,10 @@ if "features_data" not in rd_cols:
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE repo_details ADD COLUMN features_data TEXT DEFAULT '[]'"))
         conn.commit()
+if "documents" not in rd_cols:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE repo_details ADD COLUMN documents TEXT DEFAULT '[]'"))
+        conn.commit()
 
 # Dependency to get DB session
 def get_db():
@@ -241,6 +245,16 @@ def list_commits():
     return db.query(CommitSync).all()
 
 
+@app.get("/repo-details/{project_name}/docs")
+def get_project_docs(project_name: str):
+    db = SessionLocal()
+    detail = db.query(RepoDetail).filter(RepoDetail.project_name == project_name).first()
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Repo details not found.")
+    docs = json.loads(detail.documents) if isinstance(detail.documents, str) else (detail.documents or [])
+    return {"project_name": project_name, "documents": docs}
+
+
 @app.get("/scrape/logs")
 def get_scrape_logs():
     db = SessionLocal()
@@ -400,9 +414,78 @@ async def discover_features(client, project_name, headers):
     return []
 
 
+DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".txt")
+DOC_EXCLUDE = {"readme.md", "readme.rst", "architecture.md", "architecture.rst",
+               "license", "license.md", "license.rst", "contributing.md",
+               "changelog.md", "code_of_conduct.md", "security.md"}
+
+
+async def discover_documents(client, project_name, headers):
+    branches_to_try = ["main", "master"]
+
+    for branch in branches_to_try:
+        try:
+            root_resp = await client.get(
+                f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/git/trees/{branch}?recursive=1",
+                headers=headers,
+            )
+            if root_resp.status_code != 200:
+                continue
+
+            tree = root_resp.json().get("tree", [])
+            doc_candidates = []
+
+            for entry in tree:
+                if entry["type"] != "blob":
+                    continue
+                path = entry["path"]
+                ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+                if ext not in DOC_EXTENSIONS:
+                    continue
+
+                filename = path.rsplit("/", 1)[-1].lower()
+                if filename in DOC_EXCLUDE:
+                    continue
+
+                # Skip files already fetched elsewhere
+                if filename == "readme.md" and "/" not in path:
+                    continue
+
+                doc_candidates.append(path)
+
+            if not doc_candidates:
+                return []
+
+            # Fetch content for each doc
+            docs = []
+            for doc_path in doc_candidates:
+                try:
+                    resp = await client.get(
+                        f"{GITHUB_API}/repos/{GITHUB_USER}/{project_name}/contents/{doc_path}",
+                        headers=headers,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("content"):
+                            content = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+                            docs.append({
+                                "path": doc_path,
+                                "name": doc_path.rsplit("/", 1)[-1],
+                                "content": content,
+                            })
+                except Exception:
+                    continue
+
+            return docs
+        except Exception:
+            continue
+
+    return []
+
+
 async def fetch_repo_details_from_github(project_name: str):
     headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
-    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": "", "features_data": []}
+    result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": "", "features_data": [], "documents": []}
 
     async with httpx.AsyncClient() as client:
         try:
@@ -434,6 +517,7 @@ async def fetch_repo_details_from_github(project_name: str):
                 result["updated_date"] = repo_data.get("pushed_at") or ""
                 result["img"] = await discover_repo_image(client, project_name, headers)
                 result["features_data"] = await discover_features(client, project_name, headers)
+                result["documents"] = await discover_documents(client, project_name, headers)
         except Exception:
             pass
 
@@ -486,6 +570,7 @@ def get_repo_details(project_name: str):
         "img": detail.img,
         "is_backend": detail.is_backend,
         "features_data": json.loads(detail.features_data) if isinstance(detail.features_data, str) else (detail.features_data or []),
+        "documents": json.loads(detail.documents) if isinstance(detail.documents, str) else (detail.documents or []),
         "fetched_at": detail.fetched_at.isoformat() if detail.fetched_at else "",
     }
 
@@ -502,6 +587,7 @@ async def fetch_repo_details(project_name: str):
         existing.img = data["img"]
         existing.is_backend = data["is_backend"]
         existing.features_data = json.dumps(data["features_data"])
+        existing.documents = json.dumps(data["documents"])
         existing.fetched_at = datetime.utcnow()
     else:
         existing = RepoDetail(
@@ -512,6 +598,7 @@ async def fetch_repo_details(project_name: str):
             img=data["img"],
             is_backend=data["is_backend"],
             features_data=json.dumps(data["features_data"]),
+            documents=json.dumps(data["documents"]),
             fetched_at=datetime.utcnow(),
         )
         db.add(existing)
@@ -535,6 +622,7 @@ async def fetch_repo_details(project_name: str):
         "img": existing.img,
         "is_backend": existing.is_backend,
         "features_data": json.loads(existing.features_data) if isinstance(existing.features_data, str) else (existing.features_data or []),
+        "documents": json.loads(existing.documents) if isinstance(existing.documents, str) else (existing.documents or []),
         "fetched_at": existing.fetched_at.isoformat() if existing.fetched_at else "",
     }
 
