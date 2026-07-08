@@ -1,4 +1,4 @@
-import json, os, asyncio
+import json, os, asyncio, re
 from fastapi import FastAPI, HTTPException
 from database import SessionLocal, engine
 from models import Base, Project, CommitSync, ScrapeLog, RepoDetail
@@ -8,6 +8,14 @@ from datetime import datetime
 import base64
 import httpx
 from sqlalchemy import inspect, text
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+def github_headers():
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
 
 app = FastAPI()
 
@@ -351,6 +359,11 @@ async def discover_repo_image(client, project_name, headers):
 
 
 FEATURES_DIRS = ["mockups/features", "mockup/features"]
+FEATURE_IMAGE_EXTS = ("png", "jpg", "jpeg", "gif", "webp", "svg")
+
+
+def _strip_numeric_suffix(name):
+    return re.sub(r'-\d+$', '', name)
 
 
 async def discover_features(client, project_name, headers):
@@ -366,7 +379,8 @@ async def discover_features(client, project_name, headers):
                 continue
 
             tree = root_resp.json().get("tree", [])
-            groups_map = {}
+            images = {}
+            descriptions = {}
 
             for entry in tree:
                 if entry["type"] != "blob":
@@ -397,19 +411,38 @@ async def discover_features(client, project_name, headers):
                 base_name, ext = name_parts[0].lower(), name_parts[1].lower()
 
                 key = (group_name, base_name)
-                if ext in ("png", "jpg", "jpeg", "gif", "webp", "svg"):
-                    groups_map.setdefault(key, {})["img"] = path
+                if ext in FEATURE_IMAGE_EXTS:
+                    images.setdefault(key, []).append(path)
                 elif ext == "md":
-                    groups_map.setdefault(key, {})["desc"] = path
+                    descriptions[key] = path
 
             grouped = {}
-            for (group_name, base_name), files in groups_map.items():
-                if "img" in files and "desc" in files:
-                    img_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{files['img']}"
-                    desc_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{files['desc']}"
-                    grouped.setdefault(group_name, []).append({
-                        "img": img_url, "desc": desc_url, "name": base_name
-                    })
+            used_images = set()
+
+            def add_feature(group_name, img_path, desc_path, name):
+                img_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{img_path}"
+                desc_url = f"https://raw.githubusercontent.com/{GITHUB_USER}/{project_name}/{branch}/{desc_path}"
+                grouped.setdefault(group_name, []).append({
+                    "img": img_url, "desc": desc_url, "name": name
+                })
+
+            for (group_name, base_name), desc_path in descriptions.items():
+                desc_key = (group_name, base_name)
+                img_list = images.get(desc_key, [])
+                for img_path in img_list:
+                    add_feature(group_name, img_path, desc_path, base_name)
+                    used_images.add((desc_key, img_path))
+                if img_list:
+                    continue
+
+                for (img_group, img_base), img_paths in images.items():
+                    if img_group != group_name:
+                        continue
+                    if _strip_numeric_suffix(img_base) == base_name:
+                        for img_path in img_paths:
+                            if (img_group, img_base, img_path) not in used_images:
+                                add_feature(group_name, img_path, desc_path, base_name)
+                                used_images.add((img_group, img_base, img_path))
 
             result = []
             for gname in sorted(grouped.keys()):
@@ -496,7 +529,7 @@ async def discover_documents(client, project_name, headers):
 
 
 async def fetch_repo_details_from_github(project_name: str):
-    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
+    headers = github_headers()
     result = {"top_commits": "", "readme": "", "architecture": "", "img": "", "is_backend": True, "updated_date": "", "features_data": [], "documents": []}
 
     async with httpx.AsyncClient() as client:
@@ -641,7 +674,7 @@ async def fetch_repo_details(project_name: str):
 
 @app.get("/scrape")
 async def scrape_github(query: Optional[str] = None, limit: Optional[int] = None):
-    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "l-projects"}
+    headers = github_headers()
     scrape_limit = limit or SCRAPE_LIMIT
 
     async with httpx.AsyncClient() as client:

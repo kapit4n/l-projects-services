@@ -123,7 +123,7 @@ async def get_repo_details(project_name: str):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}")
         if response.status_code == 404:
-            return None
+            raise HTTPException(status_code=404, detail="Repo details not found. POST to /repo-details/{project_name}/fetch to fetch them.")
         return response.json()
 
 
@@ -131,6 +131,8 @@ async def get_repo_details(project_name: str):
 async def get_project_docs(project_name: str):
     async with httpx.AsyncClient() as client:
         response = await client.get(f"{PROJECTS_SERVICE_URL}/repo-details/{project_name}/docs")
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Repo details not found.")
         return response.json()
 
 
