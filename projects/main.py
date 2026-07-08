@@ -300,6 +300,7 @@ IMAGE_DIRS = ["screenshots", "mockups", "mockup", "assets", "images", "img", "sc
 IMAGE_NAMES = ["main", "dashboard", "home", "screenshot", "preview", "app", "ui", "interface",
                "dashboard-main", "home-page", "main-page", "overview", "landing"]
 PRIORITY_NAMES = {"dashboard", "main", "home", "dashboard-main", "home-page", "main-page", "overview", "landing"}
+DASHBOARD_FEATURE_PATHS = ["mockups/features/dashboard/", "mockup/features/dashboard/"]
 
 BACKEND_KEYWORDS = {"api", "cli", "backend", "server", "service", "graphql", "rest", "microservice"}
 BACKEND_LANGUAGES = {"python", "go", "java", "ruby", "php", "rust", "c#", "csharp", "c++", "cpp", "swift", "kotlin"}
@@ -334,8 +335,11 @@ async def discover_repo_image(client, project_name, headers):
                 in_img_dir = any(d in path.lower() for d in IMAGE_DIRS)
                 is_named = name_lower in IMAGE_NAMES
                 is_priority_name = name_lower in PRIORITY_NAMES
+                in_dashboard_feature = any(d in path.lower() for d in DASHBOARD_FEATURE_PATHS)
 
-                if is_priority_name and in_img_dir:
+                if is_priority_name and in_dashboard_feature:
+                    candidates.append((-1, path))
+                elif is_priority_name and in_img_dir:
                     candidates.append((0, path))
                 elif is_priority_name:
                     candidates.append((1, path))
